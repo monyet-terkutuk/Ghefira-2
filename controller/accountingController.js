@@ -9,25 +9,86 @@ const catchAsyncErrors = require("../middleware/catchAsyncErrors");
 
 /**
  * @route   POST /api/accounting/transactions
+ * @desc    Create transaction with double-entry accounting + ML prediction
  */
 router.post(
     "/transactions",
     isAuthenticated,
     catchAsyncErrors(async (req, res) => {
-        const { description, amount, type, date, reference } = req.body;
+        const { description, amount, type, date, reference, manual_account_code } = req.body; // ✅ TAMBAH manual_account_code
         const userId = req.user.id;
 
         try {
+            // ✅ VALIDASI INPUT
+            if (!description || !amount || !type) {
+                return res.status(400).json({
+                    code: 400,
+                    status: "error",
+                    message: "Description, amount, and type are required"
+                });
+            }
+
+            if (amount <= 0) {
+                return res.status(400).json({
+                    code: 400,
+                    status: "error",
+                    message: "Amount must be greater than 0"
+                });
+            }
+
+            if (!['income', 'expense'].includes(type)) {
+                return res.status(400).json({
+                    code: 400,
+                    status: "error",
+                    message: "Type must be 'income' or 'expense'"
+                });
+            }
+
             // 1. Pastikan default accounts tersedia
             await AccountMappingService.initializeDefaultAccounts(userId);
 
-            // 2. **FIXED: Gunakan await untuk prediction**
+            // 2. Gunakan await untuk prediction
             const prediction = await AccountClassifier.predictAccount(description, type);
+            console.log(`🔮 Prediction: '${description} ${type}' → '${prediction.category}' (confidence: ${prediction.confidence})`);
 
-            // 3. Map ke accounts yang sesuai
-            const accounts = await AccountMappingService.mapPredictionToAccounts(
-                prediction, type, amount, userId
-            );
+            let accounts;
+
+            // ✅ PERBAIKAN: Check jika menggunakan manual account code
+            if (manual_account_code) {
+                console.log(`🔧 Using manual account code: ${manual_account_code}`);
+                const manualAccount = await Account.findOne({ code: manual_account_code, user: userId });
+                if (!manualAccount) {
+                    return res.status(400).json({
+                        code: 400,
+                        status: "error",
+                        message: `Manual account not found: ${manual_account_code}`
+                    });
+                }
+
+                if (type === 'income') {
+                    accounts = {
+                        debitAccount: await Account.findOne({ code: '101', user: userId }), // Cash
+                        creditAccount: manualAccount
+                    };
+                } else {
+                    accounts = {
+                        debitAccount: manualAccount,
+                        creditAccount: await Account.findOne({ code: '101', user: userId }) // Cash
+                    };
+                }
+            } else {
+                // 3. Map ke accounts yang sesuai (auto ML prediction)
+                accounts = await AccountMappingService.mapPredictionToAccounts(
+                    prediction, type, amount, userId
+                );
+            }
+
+            // ✅ PERBAIKAN: Validasi accounts
+            if (!accounts.debitAccount || !accounts.creditAccount) {
+                throw new Error('Failed to map accounts for transaction');
+            }
+
+            console.log(`✅ Accounts mapped: Debit ${accounts.debitAccount.code} - Credit ${accounts.creditAccount.code}`);
 
             // 4. Buat journal entries
             const journalEntries = [];
@@ -67,29 +128,30 @@ router.post(
             // 5. Simpan journal entry
             const journalEntry = await JournalEntry.create({
                 transaction_date: date || new Date(),
-                reference,
+                reference: reference || '',
                 description,
                 entries: journalEntries,
                 user: userId,
-                predicted_category: prediction.category, // **FIXED: Sekarang sudah string, bukan Promise**
+                predicted_category: prediction.category,
                 ml_confidence: prediction.confidence,
                 ...(prediction.error && { prediction_error: prediction.error })
             });
 
-            // Di POST /transactions - perbaiki bagian posting
             // 6. Post journal untuk update balances
             console.log('📤 Attempting to post journal entry...');
             await journalEntry.post();
 
             // 7. Verify balances were updated
             const updatedCashAccount = await Account.findOne({ code: '101', user: userId });
-            const updatedExpenseAccount = await Account.findOne({ code: '501', user: userId });
+            const updatedDebitAccount = await Account.findById(accounts.debitAccount._id);
+            const updatedCreditAccount = await Account.findById(accounts.creditAccount._id);
 
             console.log('🔍 Balance verification:');
             console.log(`   Cash Account (101): ${updatedCashAccount.balance}`);
-            console.log(`   Expense Account (501): ${updatedExpenseAccount.balance}`);
+            console.log(`   Debit Account (${updatedDebitAccount.code}): ${updatedDebitAccount.balance}`);
+            console.log(`   Credit Account (${updatedCreditAccount.code}): ${updatedCreditAccount.balance}`);
 
-            // 7. Response dengan detail
+            // 8. Response dengan detail
             const populatedEntry = await JournalEntry.findById(journalEntry._id)
                 .populate('entries.account', 'name code type');
 
@@ -101,7 +163,8 @@ router.post(
                     prediction: {
                         category: prediction.category,
                         confidence: prediction.confidence,
-                        auto_categorized: prediction.confidence > 0.3
+                        auto_categorized: prediction.confidence > 0.3,
+                        used_manual_account: !!manual_account_code
                     },
                     message: "Transaction recorded with double-entry accounting"
                 }

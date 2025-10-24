@@ -31,13 +31,29 @@ class AccountMappingService {
                 income: null
             },
 
-            // Revenue Accounts
+            // Revenue Accounts - ✅ PERBAIKAN: Tambah alternative formats
             sales_revenue: {
                 income: '401', // Sales Revenue
                 expense: null
             },
+            'sales revenue': { // ✅ dengan space
+                income: '401',
+                expense: null
+            },
+            sales: { // ✅ shortened
+                income: '401',
+                expense: null
+            },
             service_revenue: {
                 income: '402', // Service Revenue
+                expense: null
+            },
+            'service revenue': { // ✅ dengan space
+                income: '402',
+                expense: null
+            },
+            service: { // ✅ shortened
+                income: '402',
                 expense: null
             },
 
@@ -49,6 +65,12 @@ class AccountMappingService {
             accounts_payable: {
                 income: '202', // Accounts Payable
                 expense: '202'
+            },
+
+            // ✅ NEW: Tambah uncategorized sebagai fallback
+            uncategorized: {
+                income: '401', // Fallback ke Sales Revenue
+                expense: '506' // Fallback ke Uncategorized Expense
             }
         };
     }
@@ -90,18 +112,44 @@ class AccountMappingService {
         console.log(`✅ Default accounts initialized for user ${userId}`);
     }
 
-    async mapPredictionToAccounts(prediction, transactionType, amount, userId) {
-        const mapping = this.accountMappings[prediction.category];
+    // ✅ NEW: Method untuk normalize category names
+    normalizeCategory(category) {
+        if (!category) return 'uncategorized';
 
+        const normalized = category
+            .toLowerCase()
+            .replace(/\s+/g, '_') // ganti space dengan underscore
+            .replace(/[^a-z0-9_]/g, ''); // hapus karakter khusus
+
+        console.log(`🔄 Normalized category: "${category}" → "${normalized}"`);
+        return normalized;
+    }
+
+    async mapPredictionToAccounts(prediction, transactionType, amount, userId) {
+        console.log(`🔍 Mapping prediction: "${prediction.category}" with type: ${transactionType}`);
+
+        // ✅ PERBAIKAN: Normalize category name dulu
+        const normalizedCategory = this.normalizeCategory(prediction.category);
+
+        // Cari mapping dengan urutan: normalized → original → fallback
+        let mapping = this.accountMappings[normalizedCategory] ||
+            this.accountMappings[prediction.category];
+
+        // ✅ PERBAIKAN: Better error handling dengan logging
         if (!mapping) {
+            console.log(`❌ No mapping found for category: "${prediction.category}" (normalized: "${normalizedCategory}")`);
+            console.log(`📋 Available categories: ${Object.keys(this.accountMappings).join(', ')}`);
             // Fallback ke akun uncategorized
             return await this.getUncategorizedAccounts(transactionType, userId);
         }
 
         const accountCode = mapping[transactionType];
         if (!accountCode) {
+            console.log(`❌ No mapping for "${prediction.category}" with type "${transactionType}"`);
             throw new Error(`No account mapping for ${prediction.category} with type ${transactionType}`);
         }
+
+        console.log(`✅ Found mapping: ${prediction.category} → ${accountCode}`);
 
         const account = await Account.findOne({ code: accountCode, user: userId });
         if (!account) {
@@ -110,33 +158,54 @@ class AccountMappingService {
 
         // Tentukan debit/credit berdasarkan account type dan transaction type
         if (transactionType === 'income') {
+            const cashAccount = await Account.findOne({ code: '101', user: userId });
             return {
-                debitAccount: await Account.findOne({ code: '101', user: userId }), // Cash
+                debitAccount: cashAccount, // Cash
                 creditAccount: account
             };
         } else { // expense
+            const cashAccount = await Account.findOne({ code: '101', user: userId });
             return {
                 debitAccount: account,
-                creditAccount: await Account.findOne({ code: '101', user: userId }) // Cash
+                creditAccount: cashAccount // Cash
             };
         }
     }
 
     async getUncategorizedAccounts(transactionType, userId) {
+        console.log(`🔄 Using fallback uncategorized accounts for ${transactionType}`);
+
         const cashAccount = await Account.findOne({ code: '101', user: userId });
-        const uncategorizedAccount = await Account.findOne({ code: '506', user: userId });
 
         if (transactionType === 'income') {
+            // Untuk income, fallback ke Sales Revenue (401)
+            const revenueAccount = await Account.findOne({ code: '401', user: userId });
             return {
                 debitAccount: cashAccount,
-                creditAccount: uncategorizedAccount
+                creditAccount: revenueAccount || await this.createFallbackAccount('401', 'Sales Revenue', 'revenue', userId)
             };
         } else {
+            // Untuk expense, fallback ke Uncategorized Expense (506)
+            const expenseAccount = await Account.findOne({ code: '506', user: userId });
             return {
-                debitAccount: uncategorizedAccount,
+                debitAccount: expenseAccount || await this.createFallbackAccount('506', 'Uncategorized Expense', 'expense', userId),
                 creditAccount: cashAccount
             };
         }
+    }
+
+    // ✅ NEW: Method untuk create fallback account jika tidak ada
+    async createFallbackAccount(code, name, type, userId) {
+        console.log(`📝 Creating fallback account: ${code} - ${name}`);
+        const account = await Account.create({
+            code: code,
+            name: name,
+            type: type,
+            normal_balance: type === 'revenue' ? 'credit' : 'debit',
+            user: userId,
+            balance: 0
+        });
+        return account;
     }
 
     // ✅ NEW: Method untuk set initial owner equity
@@ -147,6 +216,14 @@ class AccountMappingService {
             await ownerEquity.save();
             console.log(`✅ Owner Equity set to initial capital: ${initialCapital}`);
         }
+    }
+
+    // ✅ NEW: Method untuk debug available mappings
+    debugMappings() {
+        console.log('📋 Available Account Mappings:');
+        Object.keys(this.accountMappings).forEach(category => {
+            console.log(`   ${category}:`, this.accountMappings[category]);
+        });
     }
 }
 
