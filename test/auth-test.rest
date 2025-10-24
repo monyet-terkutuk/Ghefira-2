@@ -1,0 +1,21 @@
+POST  http://localhost:8000/auth/register
+Content-Type: application/json
+
+{
+  "nik": "12245638901334567",
+  "username": "john_doe",
+  "address": "123 Main Street",
+  "email": "user3@cloud.com",
+  "password": "securepassword"
+}
+
+
+###
+POST  http://localhost:5000/auth/login
+Content-Type: application/json
+
+{
+    "email": "user@test.com",
+    "password": "securepassword"
+}
+
