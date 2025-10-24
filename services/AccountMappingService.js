@@ -138,6 +138,16 @@ class AccountMappingService {
             };
         }
     }
+
+    // ✅ NEW: Method untuk set initial owner equity
+    async setInitialOwnerEquity(userId, initialCapital = 1000000) {
+        const ownerEquity = await Account.findOne({ code: '301', user: userId });
+        if (ownerEquity) {
+            ownerEquity.balance = initialCapital;
+            await ownerEquity.save();
+            console.log(`✅ Owner Equity set to initial capital: ${initialCapital}`);
+        }
+    }
 }
 
 module.exports = new AccountMappingService();

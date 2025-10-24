@@ -76,8 +76,18 @@ router.post(
                 ...(prediction.error && { prediction_error: prediction.error })
             });
 
+            // Di POST /transactions - perbaiki bagian posting
             // 6. Post journal untuk update balances
+            console.log('📤 Attempting to post journal entry...');
             await journalEntry.post();
+
+            // 7. Verify balances were updated
+            const updatedCashAccount = await Account.findOne({ code: '101', user: userId });
+            const updatedExpenseAccount = await Account.findOne({ code: '501', user: userId });
+
+            console.log('🔍 Balance verification:');
+            console.log(`   Cash Account (101): ${updatedCashAccount.balance}`);
+            console.log(`   Expense Account (501): ${updatedExpenseAccount.balance}`);
 
             // 7. Response dengan detail
             const populatedEntry = await JournalEntry.findById(journalEntry._id)
@@ -318,11 +328,53 @@ router.get(
         const liabilities = accounts.filter(acc => acc.type === 'liability');
         const equity = accounts.filter(acc => acc.type === 'equity');
 
-        const totalAssets = assets.reduce((sum, acc) => sum + acc.display_balance, 0);
-        const totalLiabilities = liabilities.reduce((sum, acc) => sum + acc.display_balance, 0);
-        const totalEquity = equity.reduce((sum, acc) => sum + acc.display_balance, 0);
+        // ✅ FIXED: Helper functions dalam scope yang sama
+        const getDisplayBalance = (account) => {
+            // Untuk balance sheet presentation - selalu positif
+            return Math.abs(account.balance);
+        };
 
-        const isBalanced = Math.abs(totalAssets - (totalLiabilities + totalEquity)) < 0.01;
+        const getAccountingBalance = (account) => {
+            // Untuk accounting equation - sesuai normal balance rules
+            if (account.normal_balance === 'debit') {
+                return account.balance; // Assets & Expenses: positive balance
+            } else {
+                return -account.balance; // Liabilities, Equity, Revenue: positive balance
+            }
+        };
+
+        // ✅ FIXED: Untuk display - gunakan accounting rules
+        const displayAssets = assets.map(acc => ({
+            name: acc.name,
+            code: acc.code,
+            amount: getDisplayBalance(acc),
+            actual_balance: acc.balance
+        }));
+
+        const displayLiabilities = liabilities.map(acc => ({
+            name: acc.name,
+            code: acc.code,
+            amount: getDisplayBalance(acc),
+            actual_balance: acc.balance
+        }));
+
+        const displayEquity = equity.map(acc => ({
+            name: acc.name,
+            code: acc.code,
+            amount: getDisplayBalance(acc),
+            actual_balance: acc.balance
+        }));
+
+        const totalDisplayAssets = displayAssets.reduce((sum, acc) => sum + acc.amount, 0);
+        const totalDisplayLiabilities = displayLiabilities.reduce((sum, acc) => sum + acc.amount, 0);
+        const totalDisplayEquity = displayEquity.reduce((sum, acc) => sum + acc.amount, 0);
+
+        // ✅ FIXED: Untuk accounting equation - gunakan accounting rules
+        const totalActualAssets = assets.reduce((sum, acc) => sum + getAccountingBalance(acc), 0);
+        const totalActualLiabilities = liabilities.reduce((sum, acc) => sum + getAccountingBalance(acc), 0);
+        const totalActualEquity = equity.reduce((sum, acc) => sum + getAccountingBalance(acc), 0);
+
+        const isBalanced = Math.abs(totalActualAssets - (totalActualLiabilities + totalActualEquity)) < 0.01;
 
         res.status(200).json({
             code: 200,
@@ -330,42 +382,31 @@ router.get(
             data: {
                 balance_sheet: {
                     assets: {
-                        accounts: assets.map(acc => ({
-                            name: acc.name,
-                            code: acc.code,
-                            amount: acc.display_balance
-                        })),
-                        total: totalAssets
+                        accounts: displayAssets,
+                        total: totalDisplayAssets
                     },
                     liabilities: {
-                        accounts: liabilities.map(acc => ({
-                            name: acc.name,
-                            code: acc.code,
-                            amount: acc.display_balance
-                        })),
-                        total: totalLiabilities
+                        accounts: displayLiabilities,
+                        total: totalDisplayLiabilities
                     },
                     equity: {
-                        accounts: equity.map(acc => ({
-                            name: acc.name,
-                            code: acc.code,
-                            amount: acc.display_balance
-                        })),
-                        total: totalEquity
+                        accounts: displayEquity,
+                        total: totalDisplayEquity
                     }
                 },
                 accounting_equation: {
-                    assets: totalAssets,
-                    liabilities_plus_equity: totalLiabilities + totalEquity,
+                    assets_actual: totalActualAssets,
+                    liabilities_actual: totalActualLiabilities,
+                    equity_actual: totalActualEquity,
+                    liabilities_plus_equity: totalActualLiabilities + totalActualEquity,
                     is_balanced: isBalanced,
-                    difference: Math.abs(totalAssets - (totalLiabilities + totalEquity))
+                    difference: Math.abs(totalActualAssets - (totalActualLiabilities + totalActualEquity))
                 },
                 as_of_date: asOfDate.toISOString().split('T')[0]
             }
         });
     })
 );
-
 /**
  * @route   GET /api/accounting/reports/cash-flow
  * @desc    Get cash flow statement
@@ -736,6 +777,54 @@ router.get(
 );
 
 /**
+ * @route   POST /api/accounting/journal-entries/:id/post
+ * @desc    Post a draft journal entry (update balances)
+ */
+router.post(
+    "/journal-entries/:id/post",
+    isAuthenticated,
+    catchAsyncErrors(async (req, res) => {
+        const journalEntry = await JournalEntry.findById(req.params.id);
+
+        if (!journalEntry) {
+            return res.status(404).json({
+                code: 404,
+                status: "error",
+                message: "Journal entry not found"
+            });
+        }
+
+        if (journalEntry.status !== 'draft') {
+            return res.status(400).json({
+                code: 400,
+                status: "error",
+                message: "Only draft entries can be posted"
+            });
+        }
+
+        try {
+            await journalEntry.post();
+
+            const updatedEntry = await JournalEntry.findById(req.params.id)
+                .populate('entries.account', 'name code type');
+
+            res.status(200).json({
+                code: 200,
+                status: "success",
+                data: { journalEntry: updatedEntry },
+                message: "Journal entry posted successfully"
+            });
+        } catch (error) {
+            res.status(400).json({
+                code: 400,
+                status: "error",
+                message: error.message
+            });
+        }
+    })
+);
+
+/**
  * @route   PUT /api/accounting/journal-entries/:id
  * @desc    Update journal entry (only draft entries can be updated)
  */
@@ -743,9 +832,9 @@ router.put(
     "/journal-entries/:id",
     isAuthenticated,
     catchAsyncErrors(async (req, res) => {
-        const { description, reference, transaction_date, entries } = req.body;
+        const { description, reference, transaction_date } = req.body;
 
-        const journalEntry = await JournalEntry.findById(req.params.ieyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY4ODRiYTI0YTZhNjYxNTExM2I3YTRhNSIsInJvbGUiOiJ1c2VyIiwiaWF0IjoxNzYxMzI0NTg5LCJleHAiOjE3NjE0MTA5ODl9.rHn0Mbvo6ewHDlji4dw0JtS9OZ - SuWXD1708xIfRqVkd);
+        const journalEntry = await JournalEntry.findById(req.params.id); // ✅ FIXED
         if (!journalEntry) {
             return res.status(404).json({
                 code: 404,
@@ -763,26 +852,11 @@ router.put(
             });
         }
 
-        // Validate entries balance
-        if (entries) {
-            const totalDebit = entries.reduce((sum, entry) => sum + entry.debit, 0);
-            const totalCredit = entries.reduce((sum, entry) => sum + entry.credit, 0);
-
-            if (totalDebit !== totalCredit) {
-                return res.status(400).json({
-                    code: 400,
-                    status: "error",
-                    message: `Unbalanced journal entry: Debit ${totalDebit} ≠ Credit ${totalCredit}`
-                });
-            }
-        }
-
         // Update fields
         const updateData = {};
         if (description) updateData.description = description;
         if (reference) updateData.reference = reference;
         if (transaction_date) updateData.transaction_date = transaction_date;
-        if (entries) updateData.entries = entries;
 
         const updatedEntry = await JournalEntry.findByIdAndUpdate(
             req.params.id,
@@ -798,7 +872,6 @@ router.put(
         });
     })
 );
-
 
 /**
  * @route   DELETE /api/accounting/journal-entries/:id
@@ -818,33 +891,34 @@ router.delete(
             });
         }
 
-        // Reverse the balances if entry was posted
-        if (journalEntry.status === 'posted') {
-            for (const entry of journalEntry.entries) {
-                const account = await Account.findById(entry.account);
-
-                if (entry.debit > 0) {
-                    account.balance -= entry.debit;
-                } else if (entry.credit > 0) {
-                    account.balance += entry.credit;
-                }
-
-                await account.save();
+        try {
+            // Gunakan method reverse() untuk konsistensi
+            if (journalEntry.status === 'posted') {
+                await journalEntry.reverse();
+            } else {
+                // Untuk draft entries, cukup ubah status
+                journalEntry.status = 'cancelled';
+                await journalEntry.save();
             }
+
+            res.status(200).json({
+                code: 200,
+                status: "success",
+                message: "Journal entry cancelled successfully",
+                data: {
+                    id: journalEntry._id,
+                    status: journalEntry.status
+                }
+            });
+        } catch (error) {
+            res.status(400).json({
+                code: 400,
+                status: "error",
+                message: error.message
+            });
         }
-
-        // Soft delete by changing status
-        journalEntry.status = 'cancelled';
-        await journalEntry.save();
-
-        res.status(200).json({
-            code: 200,
-            status: "success",
-            message: "Journal entry cancelled successfully"
-        });
     })
 );
-
 /**
  * @route   PUT /api/accounting/accounts/:id
  * @desc    Update account
